@@ -339,14 +339,22 @@ class AuthorizedHttp(RequestMethods):  # type: ignore
                 creation failed for any reason.
         """
         use_client_cert = os.getenv(
-            environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE, "false"
-        )
+            environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE)
         if use_client_cert != "true":
-            self._is_mtls = False
-            return False
-        else:
-            self._is_mtls = True
-
+            ## Check if workload is present in the certificate config file 
+            ## and GOOGLE_API_USE_CLIENT_CERTIFICATE is unset.
+            if _mtls_helper.check_use_client_cert_for_workload(
+                use_client_cert
+            ):
+                os.putenv(
+                    environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE, "true"
+                )
+                use_client_cert = "true"
+                self._is_mtls = True
+            else:
+                use_client_cert = "false"
+                self._is_mtls = False
+                return False
         try:
             import OpenSSL
         except ImportError as caught_exc:
