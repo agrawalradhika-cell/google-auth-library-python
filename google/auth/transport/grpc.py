@@ -304,15 +304,24 @@ def secure_authorized_channel(
         )
 
     # If SSL credentials are not explicitly set, try client_cert_callback and ADC.
+    cached_cert = None
     if not ssl_credentials:
         use_client_cert = _mtls_helper.check_use_client_cert()
         if use_client_cert and client_cert_callback:
             # Use the callback if provided.
             ssl_credentials = _get_ssl_channel_credentials(client_cert_callback)
+            try:
+                callback_result = client_cert_callback()
+                cached_cert = callback_result[0]
+            except Exception:
+                # If callback fails, we can't get the cached cert.
+                # It will be handled by the fetcher later if possible.
+                pass
         elif use_client_cert:
             # Use application default SSL credentials.
             adc_ssl_credentils = SslCredentials()
             ssl_credentials = adc_ssl_credentils.ssl_credentials
+            cached_cert = adc_ssl_credentils._cached_cert
         else:
             ssl_credentials = grpc.ssl_channel_credentials()
 
@@ -321,7 +330,14 @@ def secure_authorized_channel(
         ssl_credentials, google_auth_credentials
     )
 
-    return grpc.secure_channel(target, composite_credentials, **kwargs)
+    channel = grpc.secure_channel(target, composite_credentials, **kwargs)
+
+    if cached_cert:
+        interceptor = _MTLSCallInterceptor(cached_cert)
+        return grpc.intercept_channel(channel, interceptor)
+
+    return channel
+
 
 
 class SslCredentials:
@@ -340,6 +356,7 @@ class SslCredentials:
 
     def __init__(self):
         self._is_mtls = _mtls_helper.check_use_client_cert()
+        self._cached_cert = None
 
     @property
     def ssl_credentials(self):
@@ -362,6 +379,7 @@ class SslCredentials:
 
                 def client_cert_callback():
                     _, cert, key, _, root = _mtls_helper.get_client_ssl_credentials()
+                    self._cached_cert = cert
                     return cert, key, root
 
                 self._ssl_credentials = _get_ssl_channel_credentials(client_cert_callback)
@@ -377,3 +395,51 @@ class SslCredentials:
     def is_mtls(self):
         """Indicates if the created SSL channel credentials is mutual TLS."""
         return self._is_mtls
+
+
+class _MTLSCallInterceptor(
+    grpc.UnaryUnaryClientInterceptor,
+    grpc.UnaryStreamClientInterceptor,
+    grpc.StreamUnaryClientInterceptor,
+    grpc.StreamStreamClientInterceptor,
+):
+    """An interceptor that retries on UNAUTHENTICATED error due to cert rotation."""
+
+    def __init__(self, cached_cert):
+        self._cached_cert = cached_cert
+
+    def _should_retry(self, code):
+        if code != grpc.StatusCode.UNAUTHENTICATED:
+            return False
+
+        (
+            call_cert_bytes,
+            _,
+            cached_fingerprint,
+            current_cert_fingerprint,
+        ) = _mtls_helper.check_parameters_for_unauthorized_response(self._cached_cert)
+
+        if cached_fingerprint != current_cert_fingerprint:
+            _LOGGER.info("Client certificate has changed, retrying mTLS connection.")
+            self._cached_cert = call_cert_bytes
+            return True
+        return False
+
+    def intercept_unary_unary(self, continuation, client_call_details, request):
+        response = continuation(client_call_details, request)
+        if self._should_retry(response.code()):
+            return continuation(client_call_details, request)
+        return response
+
+    def intercept_unary_stream(self, continuation, client_call_details, request):
+        return continuation(client_call_details, request)
+
+    def intercept_stream_unary(
+        self, continuation, client_call_details, request_iterator
+    ):
+        return continuation(client_call_details, request_iterator)
+
+    def intercept_stream_stream(
+        self, continuation, client_call_details, request_iterator
+    ):
+        return continuation(client_call_details, request_iterator)

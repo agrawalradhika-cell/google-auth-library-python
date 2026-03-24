@@ -197,7 +197,38 @@ class TestSecureAuthorizedChannel(object):
             composite_channel_credentials.return_value,
             options=mock.sentinel.options,
         )
-        assert channel == secure_channel.return_value
+
+    @mock.patch("google.auth.transport.grpc._MTLSCallInterceptor", autospec=True)
+    @mock.patch("grpc.intercept_channel", autospec=True)
+    def test_secure_authorized_channel_with_interceptor(
+        self,
+        intercept_channel,
+        mock_interceptor,
+        secure_channel,
+        ssl_channel_credentials,
+        metadata_call_credentials,
+        composite_channel_credentials,
+        get_client_ssl_credentials,
+    ):
+        credentials = mock.Mock()
+        request = mock.Mock()
+        target = "example.com:80"
+        client_cert_callback = mock.Mock()
+        client_cert_callback.return_value = (PUBLIC_CERT_BYTES, PRIVATE_KEY_BYTES)
+
+        with mock.patch.dict(
+            os.environ, {environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE: "true"}
+        ):
+            google.auth.transport.grpc.secure_authorized_channel(
+                credentials, request, target, client_cert_callback=client_cert_callback
+            )
+
+        # Check interceptor was created with the initial cert
+        mock_interceptor.assert_called_once_with(PUBLIC_CERT_BYTES)
+        # Check channel was intercepted
+        intercept_channel.assert_called_once_with(
+            secure_channel.return_value, mock_interceptor.return_value
+        )
 
     @mock.patch("google.auth.transport.grpc.SslCredentials", autospec=True)
     def test_secure_authorized_channel_adc_without_client_cert_env(
@@ -315,7 +346,10 @@ class TestSecureAuthorizedChannel(object):
                 credentials, request, target, client_cert_callback=client_cert_callback
             )
 
-        client_cert_callback.assert_called_once()
+        # Called twice: once to get the initial cert for the interceptor,
+        # and once in _get_ssl_channel_credentials (immediately since fetcher
+        # attributes aren't mocked here).
+        assert client_cert_callback.call_count == 2
 
         # Check we are using the cert and key provided by client_cert_callback.
         ssl_channel_credentials.assert_called_once()
@@ -388,24 +422,23 @@ class TestSecureAuthorizedChannel(object):
         )
 
 
-@mock.patch("grpc.SslCertificateConfiguration", autospec=True)
-@mock.patch("grpc.SslKeyCertificatePair", autospec=True)
-@mock.patch("grpc.ssl_channel_credentials", autospec=True)
+@mock.patch("google.auth.transport.grpc.grpc")
 class TestGetSslChannelCredentials(object):
     def test__get_ssl_channel_credentials_with_fetcher(
         self,
-        mock_ssl_channel_credentials,
-        mock_key_cert_pair,
-        mock_cert_config,
+        mock_grpc_transport,
     ):
+        mock_ssl_channel_credentials = mock.Mock()
+        mock_key_cert_pair = mock.Mock()
+        mock_cert_config = mock.Mock()
+        mock_grpc_transport.SslCertificateConfiguration = mock_cert_config
+        mock_grpc_transport.SslKeyCertificatePair = mock_key_cert_pair
+        mock_grpc_transport.ssl_channel_credentials = mock_ssl_channel_credentials
+
         client_cert_callback = mock.Mock()
         client_cert_callback.return_value = (PUBLIC_CERT_BYTES, PRIVATE_KEY_BYTES)
 
-        # Mock existence of SslCertificateConfiguration and SslKeyCertificatePair
-        with mock.patch("grpc.SslCertificateConfiguration", mock_cert_config), mock.patch(
-            "grpc.SslKeyCertificatePair", mock_key_cert_pair
-        ):
-            google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
+        google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
 
         # Check if ssl_channel_credentials was called with fetcher
         mock_ssl_channel_credentials.assert_called_once()
@@ -419,14 +452,21 @@ class TestGetSslChannelCredentials(object):
         mock_key_cert_pair.assert_called_once_with(
             PRIVATE_KEY_BYTES, PUBLIC_CERT_BYTES
         )
-        mock_cert_config.assert_called_once_with([mock_key_cert_pair.return_value])
+        mock_cert_config.assert_called_once_with(
+            [mock_key_cert_pair.return_value], root_certificates=None
+        )
 
     def test__get_ssl_channel_credentials_with_root_cert(
         self,
-        mock_ssl_channel_credentials,
-        mock_key_cert_pair,
-        mock_cert_config,
+        mock_grpc_transport,
     ):
+        mock_ssl_channel_credentials = mock.Mock()
+        mock_key_cert_pair = mock.Mock()
+        mock_cert_config = mock.Mock()
+        mock_grpc_transport.SslCertificateConfiguration = mock_cert_config
+        mock_grpc_transport.SslKeyCertificatePair = mock_key_cert_pair
+        mock_grpc_transport.ssl_channel_credentials = mock_ssl_channel_credentials
+
         ROOT_CERT_BYTES = b"root-cert"
         client_cert_callback = mock.Mock()
         client_cert_callback.return_value = (
@@ -435,11 +475,7 @@ class TestGetSslChannelCredentials(object):
             ROOT_CERT_BYTES,
         )
 
-        # Mock existence of SslCertificateConfiguration and SslKeyCertificatePair
-        with mock.patch("grpc.SslCertificateConfiguration", mock_cert_config), mock.patch(
-            "grpc.SslKeyCertificatePair", mock_key_cert_pair
-        ):
-            google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
+        google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
 
         # Check if ssl_channel_credentials was called with fetcher
         mock_ssl_channel_credentials.assert_called_once()
@@ -459,24 +495,23 @@ class TestGetSslChannelCredentials(object):
 
     def test__get_ssl_channel_credentials_fallback(
         self,
-        mock_ssl_channel_credentials,
-        mock_key_cert_pair,
-        mock_cert_config,
+        mock_grpc_transport,
     ):
+        mock_ssl_channel_credentials = mock.Mock()
+        # Mock non-existence of fetcher support
+        if hasattr(mock_grpc_transport, "SslCertificateConfiguration"):
+            del mock_grpc_transport.SslCertificateConfiguration
+        if hasattr(mock_grpc_transport, "SslKeyCertificatePair"):
+            del mock_grpc_transport.SslKeyCertificatePair
+        mock_grpc_transport.ssl_channel_credentials = mock_ssl_channel_credentials
+
         client_cert_callback = mock.Mock()
         client_cert_callback.return_value = (PUBLIC_CERT_BYTES, PRIVATE_KEY_BYTES)
 
-        # Mock that certificate_configuration_fetcher is not supported (TypeError)
-        mock_ssl_channel_credentials.side_effect = [TypeError, mock.Mock()]
-
-        # Mock existence of SslCertificateConfiguration and SslKeyCertificatePair
-        with mock.patch("grpc.SslCertificateConfiguration", mock_cert_config), mock.patch(
-            "grpc.SslKeyCertificatePair", mock_key_cert_pair
-        ):
-            google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
+        google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
 
         # Check if it fell back to certificate_chain and private_key
-        assert mock_ssl_channel_credentials.call_count == 2
+        mock_ssl_channel_credentials.assert_called_once()
         _, kwargs = mock_ssl_channel_credentials.call_args
         assert kwargs["certificate_chain"] == PUBLIC_CERT_BYTES
         assert kwargs["private_key"] == PRIVATE_KEY_BYTES
@@ -484,26 +519,20 @@ class TestGetSslChannelCredentials(object):
 
     def test__get_ssl_channel_credentials_no_support(
         self,
-        mock_ssl_channel_credentials,
-        mock_key_cert_pair,
-        mock_cert_config,
+        mock_grpc_transport,
     ):
+        mock_ssl_channel_credentials = mock.Mock()
+        # Mock non-existence of fetcher support
+        if hasattr(mock_grpc_transport, "SslCertificateConfiguration"):
+            del mock_grpc_transport.SslCertificateConfiguration
+        if hasattr(mock_grpc_transport, "SslKeyCertificatePair"):
+            del mock_grpc_transport.SslKeyCertificatePair
+        mock_grpc_transport.ssl_channel_credentials = mock_ssl_channel_credentials
+
         client_cert_callback = mock.Mock()
         client_cert_callback.return_value = (PUBLIC_CERT_BYTES, PRIVATE_KEY_BYTES)
 
-        # Mock non-existence of SslCertificateConfiguration in the transport module
-        with mock.patch("google.auth.transport.grpc.grpc") as mock_grpc_trans:
-            if hasattr(mock_grpc_trans, "SslCertificateConfiguration"):
-                del mock_grpc_trans.SslCertificateConfiguration
-            if hasattr(mock_grpc_trans, "SslKeyCertificatePair"):
-                del mock_grpc_trans.SslKeyCertificatePair
-
-            # We also need to mock ssl_channel_credentials in the patched grpc
-            mock_grpc_trans.ssl_channel_credentials = mock_ssl_channel_credentials
-
-            google.auth.transport.grpc._get_ssl_channel_credentials(
-                client_cert_callback
-            )
+        google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
 
         # Check if it used certificate_chain and private_key directly
         mock_ssl_channel_credentials.assert_called_once()
@@ -529,6 +558,13 @@ class TestSslCredentials(object):
     ):
         # Mock that the metadata file doesn't exist.
         mock_check_config_path.return_value = None
+        mock_get_client_ssl_credentials.return_value = (
+            True,
+            PUBLIC_CERT_BYTES,
+            PRIVATE_KEY_BYTES,
+            None,
+            None,
+        )
 
         with mock.patch.dict(
             os.environ, {environment_vars.GOOGLE_API_USE_CLIENT_CERTIFICATE: "true"}
@@ -611,3 +647,89 @@ class TestSslCredentials(object):
         mock_load_json_file.assert_not_called()
         mock_get_client_ssl_credentials.assert_not_called()
         mock_ssl_channel_credentials.assert_called_once()
+
+
+@pytest.mark.skipif(not HAS_GRPC, reason="gRPC is unavailable.")
+class TestAuthInterceptor(object):
+    def test_intercept_unary_unary_retry(self):
+        from google.auth.transport.grpc import _MTLSCallInterceptor
+
+        cached_cert = b"old-cert"
+        new_cert = b"new-cert"
+        interceptor = _MTLSCallInterceptor(cached_cert)
+
+        continuation = mock.Mock()
+        response1 = mock.Mock(spec=grpc.Call)
+        response1.code.return_value = grpc.StatusCode.UNAUTHENTICATED
+        response2 = mock.Mock(spec=grpc.Call)
+        response2.code.return_value = grpc.StatusCode.OK
+        continuation.side_effect = [response1, response2]
+
+        client_call_details = mock.Mock()
+        request = mock.Mock()
+
+        with mock.patch(
+            "google.auth.transport._mtls_helper.check_parameters_for_unauthorized_response"
+        ) as mock_check:
+            # First call: cert mismatch
+            mock_check.return_value = (new_cert, b"key", "old-fp", "new-fp")
+
+            result = interceptor.intercept_unary_unary(
+                continuation, client_call_details, request
+            )
+
+            assert result == response2
+            assert continuation.call_count == 2
+            assert interceptor._cached_cert == new_cert
+            mock_check.assert_called_once_with(cached_cert)
+
+    def test_intercept_unary_unary_no_retry(self):
+        from google.auth.transport.grpc import _MTLSCallInterceptor
+
+        cached_cert = b"cert"
+        interceptor = _MTLSCallInterceptor(cached_cert)
+
+        continuation = mock.Mock()
+        response = mock.Mock(spec=grpc.Call)
+        response.code.return_value = grpc.StatusCode.UNAUTHENTICATED
+        continuation.return_value = response
+
+        client_call_details = mock.Mock()
+        request = mock.Mock()
+
+        with mock.patch(
+            "google.auth.transport._mtls_helper.check_parameters_for_unauthorized_response"
+        ) as mock_check:
+            # Cert matches, no retry
+            mock_check.return_value = (cached_cert, b"key", "fp", "fp")
+
+            result = interceptor.intercept_unary_unary(
+                continuation, client_call_details, request
+            )
+
+            assert result == response
+            assert continuation.call_count == 1
+            mock_check.assert_called_once_with(cached_cert)
+
+    def test_intercept_unary_unary_other_error(self):
+        from google.auth.transport.grpc import _MTLSCallInterceptor
+
+        interceptor = _MTLSCallInterceptor(b"cert")
+
+        continuation = mock.Mock()
+        response = mock.Mock(spec=grpc.Call)
+        response.code.return_value = grpc.StatusCode.INTERNAL
+        continuation.return_value = response
+
+        client_call_details = mock.Mock()
+        request = mock.Mock()
+
+        with mock.patch(
+            "google.auth.transport._mtls_helper.check_parameters_for_unauthorized_response"
+        ) as mock_check:
+            result = interceptor.intercept_unary_unary(
+                continuation, client_call_details, request
+            )
+
+            assert result == response
+            assert not mock_check.called
