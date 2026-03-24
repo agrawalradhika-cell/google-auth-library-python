@@ -153,16 +153,16 @@ async def get_client_ssl_credentials(
     """
 
     # Attempt to retrieve X.509 Workload cert and key.
-    cert, key = await _run_in_executor(
+    cert, key, root_cert = await _run_in_executor(
         google.auth.transport._mtls_helper._get_workload_cert_and_key,
         certificate_config_path,
         False,
     )
 
     if cert and key:
-        return True, cert, key, None
+        return True, cert, key, None, root_cert
 
-    return False, None, None, None
+    return False, None, None, None, None
 
 
 async def get_client_cert_and_key(client_cert_callback=None):
@@ -193,5 +193,5 @@ async def get_client_cert_and_key(client_cert_callback=None):
             cert, key = result
         return True, cert, key
 
-    has_cert, cert, key, _ = await get_client_ssl_credentials()
+    has_cert, cert, key, _, _ = await get_client_ssl_credentials()
     return has_cert, cert, key

@@ -119,22 +119,22 @@ def _get_workload_cert_and_key(
         SecureConnect mTLS configuration.
 
     Returns:
-        Tuple[Optional[bytes], Optional[bytes]]: client certificate bytes in PEM format and key
-            bytes in PEM format.
+        Tuple[Optional[bytes], Optional[bytes], Optional[bytes]]: client certificate bytes in PEM
+            format, key bytes in PEM format and root certificate bytes in PEM format.
 
     Raises:
         google.auth.exceptions.ClientCertError: if problems occurs when retrieving
         the certificate or key information.
     """
 
-    cert_path, key_path = _get_workload_cert_and_key_paths(
+    cert_path, key_path, root_cert_path = _get_workload_cert_and_key_paths(
         certificate_config_path, include_context_aware
     )
 
     if cert_path is None and key_path is None:
-        return None, None
+        return None, None, None
 
-    return _read_cert_and_key_files(cert_path, key_path)
+    return _read_cert_and_key_files(cert_path, key_path, root_cert_path)
 
 
 def _get_cert_config_path(certificate_config_path=None, include_context_aware=True):
@@ -215,6 +215,8 @@ def _get_workload_cert_and_key_paths(config_path, include_context_aware=True):
         )
     key_path = workload["key_path"]
 
+    root_cert_path = workload.get("root_cert_path")
+
     # == BEGIN Temporary Cloud Run PATCH ==
     # See https://github.com/googleapis/google-auth-library-python/issues/1881
     if (cert_path == _INCORRECT_CLOUD_RUN_CERT_PATH) and (
@@ -234,14 +236,17 @@ def _get_workload_cert_and_key_paths(config_path, include_context_aware=True):
             key_path = _WELL_KNOWN_CLOUD_RUN_KEY_PATH
     # == END Temporary Cloud Run PATCH ==
 
-    return cert_path, key_path
+    return cert_path, key_path, root_cert_path
 
 
-def _read_cert_and_key_files(cert_path, key_path):
+def _read_cert_and_key_files(cert_path, key_path, root_cert_path=None):
     cert_data = _read_cert_file(cert_path)
     key_data = _read_key_file(key_path)
+    root_cert_data = None
+    if root_cert_path:
+        root_cert_data = _read_cert_file(root_cert_path)
 
-    return cert_data, key_data
+    return cert_data, key_data, root_cert_data
 
 
 def _read_cert_file(cert_path):
@@ -332,7 +337,7 @@ def get_client_ssl_credentials(
     context_aware_metadata_path=CONTEXT_AWARE_METADATA_PATH,
     certificate_config_path=None,
 ):
-    """Returns the client side certificate, private key and passphrase.
+    """Returns the client side certificate, private key, passphrase and root certificate.
 
     We look for certificates and keys with the following order of priority:
         1. Certificate and key specified by certificate_config.json.
@@ -348,9 +353,10 @@ def get_client_ssl_credentials(
         certificate_config_path (str): The certificate_config.json file path.
 
     Returns:
-        Tuple[bool, bytes, bytes, bytes]:
+        Tuple[bool, bytes, bytes, bytes, bytes]:
             A boolean indicating if cert, key and passphrase are obtained, the
-            cert bytes and key bytes both in PEM format, and passphrase bytes.
+            cert bytes and key bytes both in PEM format, passphrase bytes, and
+            root certificate bytes in PEM format.
 
     Raises:
         google.auth.exceptions.ClientCertError: if problems occurs when getting
@@ -358,9 +364,9 @@ def get_client_ssl_credentials(
     """
 
     # 1.  Attempt to retrieve X.509 Workload cert and key.
-    cert, key = _get_workload_cert_and_key(certificate_config_path)
+    cert, key, root_cert = _get_workload_cert_and_key(certificate_config_path)
     if cert and key:
-        return True, cert, key, None
+        return True, cert, key, None, root_cert
 
     # 2. Check for context aware metadata json
     metadata_path = _check_config_path(context_aware_metadata_path)
@@ -380,9 +386,9 @@ def get_client_ssl_credentials(
         cert, key, passphrase = _run_cert_provider_command(
             command, expect_encrypted_key=generate_encrypted_key
         )
-        return True, cert, key, passphrase
+        return True, cert, key, passphrase, None
 
-    return False, None, None, None
+    return False, None, None, None, None
 
 
 def get_client_cert_and_key(client_cert_callback=None):
@@ -409,7 +415,7 @@ def get_client_cert_and_key(client_cert_callback=None):
         cert, key = client_cert_callback()
         return True, cert, key
 
-    has_cert, cert, key, _ = get_client_ssl_credentials(generate_encrypted_key=False)
+    has_cert, cert, key, _, _ = get_client_ssl_credentials(generate_encrypted_key=False)
     return has_cert, cert, key
 
 
@@ -532,7 +538,7 @@ def check_parameters_for_unauthorized_response(cached_cert):
 
 def call_client_cert_callback():
     """Calls the client cert callback and returns the certificate and key."""
-    _, cert_bytes, key_bytes, passphrase = get_client_ssl_credentials(
+    _, cert_bytes, key_bytes, passphrase, _ = get_client_ssl_credentials(
         generate_encrypted_key=True
     )
     return cert_bytes, key_bytes

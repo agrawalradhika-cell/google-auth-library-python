@@ -293,12 +293,13 @@ class TestGetClientSslCredentials(object):
         mock_check_config_path.return_value = "/path/to/config"
         mock_load_json_file.return_value = {"cert_provider_command": ["command"]}
         mock_run_cert_provider_command.return_value = (b"cert", b"key", None)
-        mock_get_workload_cert_and_key.return_value = (None, None)
-        has_cert, cert, key, passphrase = _mtls_helper.get_client_ssl_credentials()
+        mock_get_workload_cert_and_key.return_value = (None, None, None)
+        has_cert, cert, key, passphrase, root_cert = _mtls_helper.get_client_ssl_credentials()
         assert has_cert
         assert cert == b"cert"
         assert key == b"key"
         assert passphrase is None
+        assert root_cert is None
 
     @mock.patch(
         "google.auth.transport._mtls_helper._read_cert_and_key_files", autospec=True
@@ -326,13 +327,15 @@ class TestGetClientSslCredentials(object):
         mock_read_cert_and_key_files.return_value = (
             pytest.public_cert_bytes,
             pytest.private_key_bytes,
+            None,
         )
 
-        has_cert, cert, key, passphrase = _mtls_helper.get_client_ssl_credentials()
+        has_cert, cert, key, passphrase, root_cert = _mtls_helper.get_client_ssl_credentials()
         assert has_cert
         assert cert == pytest.public_cert_bytes
         assert key == pytest.private_key_bytes
         assert passphrase is None
+        assert root_cert is None
 
     @mock.patch(
         "google.auth.transport._mtls_helper._read_cert_and_key_files", autospec=True
@@ -363,17 +366,20 @@ class TestGetClientSslCredentials(object):
         mock_read_cert_and_key_files.return_value = (
             pytest.public_cert_bytes,
             pytest.private_key_bytes,
+            None,
         )
 
-        has_cert, cert, key, passphrase = _mtls_helper.get_client_ssl_credentials()
+        has_cert, cert, key, passphrase, root_cert = _mtls_helper.get_client_ssl_credentials()
         assert has_cert
         assert cert == pytest.public_cert_bytes
         assert key == pytest.private_key_bytes
         assert passphrase is None
+        assert root_cert is None
 
         mock_read_cert_and_key_files.assert_called_once_with(
             _mtls_helper._WELL_KNOWN_CLOUD_RUN_CERT_PATH,
             _mtls_helper._WELL_KNOWN_CLOUD_RUN_KEY_PATH,
+            None,
         )
 
     @mock.patch("os.path.exists", autospec=True)
@@ -408,17 +414,20 @@ class TestGetClientSslCredentials(object):
         mock_read_cert_and_key_files.return_value = (
             pytest.public_cert_bytes,
             pytest.private_key_bytes,
+            None,
         )
 
-        has_cert, cert, key, passphrase = _mtls_helper.get_client_ssl_credentials()
+        has_cert, cert, key, passphrase, root_cert = _mtls_helper.get_client_ssl_credentials()
         assert has_cert
         assert cert == pytest.public_cert_bytes
         assert key == pytest.private_key_bytes
         assert passphrase is None
+        assert root_cert is None
 
         mock_read_cert_and_key_files.assert_called_once_with(
             _mtls_helper._INCORRECT_CLOUD_RUN_CERT_PATH,
             _mtls_helper._INCORRECT_CLOUD_RUN_KEY_PATH,
+            None,
         )
 
     @mock.patch(
@@ -429,12 +438,13 @@ class TestGetClientSslCredentials(object):
         self, mock_check_config_path, mock_get_workload_cert_and_key
     ):
         mock_check_config_path.return_value = False
-        mock_get_workload_cert_and_key.return_value = (None, None)
-        has_cert, cert, key, passphrase = _mtls_helper.get_client_ssl_credentials()
+        mock_get_workload_cert_and_key.return_value = (None, None, None)
+        has_cert, cert, key, passphrase, root_cert = _mtls_helper.get_client_ssl_credentials()
         assert not has_cert
         assert cert is None
         assert key is None
         assert passphrase is None
+        assert root_cert is None
 
     @mock.patch(
         "google.auth.transport._mtls_helper._get_workload_cert_and_key", autospec=True
@@ -454,14 +464,15 @@ class TestGetClientSslCredentials(object):
         mock_check_config_path.return_value = "/path/to/config"
         mock_load_json_file.return_value = {"cert_provider_command": ["command"]}
         mock_run_cert_provider_command.return_value = (b"cert", b"key", b"passphrase")
-        mock_get_workload_cert_and_key.return_value = (None, None)
-        has_cert, cert, key, passphrase = _mtls_helper.get_client_ssl_credentials(
+        mock_get_workload_cert_and_key.return_value = (None, None, None)
+        has_cert, cert, key, passphrase, root_cert = _mtls_helper.get_client_ssl_credentials(
             generate_encrypted_key=True
         )
         assert has_cert
         assert cert == b"cert"
         assert key == b"key"
         assert passphrase == b"passphrase"
+        assert root_cert is None
         mock_run_cert_provider_command.assert_called_once_with(
             ["command", "--with_passphrase"], expect_encrypted_key=True
         )
@@ -479,7 +490,7 @@ class TestGetClientSslCredentials(object):
     ):
         mock_check_config_path.return_value = "/path/to/config"
         mock_load_json_file.return_value = {}
-        mock_get_workload_cert_and_key.return_value = (None, None)
+        mock_get_workload_cert_and_key.return_value = (None, None, None)
         with pytest.raises(exceptions.ClientCertError):
             _mtls_helper.get_client_ssl_credentials()
 
@@ -498,13 +509,13 @@ class TestGetClientSslCredentials(object):
         mock_load_json_file,
         mock_run_cert_provider_command,
     ):
-        mock_get_workload_cert_and_key.return_value = (None, None)
+        mock_get_workload_cert_and_key.return_value = (None, None, None)
         context_aware_metadata_path = "/path/to/metata/data"
         mock_check_config_path.return_value = context_aware_metadata_path
         mock_load_json_file.return_value = {"cert_provider_command": ["command"]}
         mock_run_cert_provider_command.return_value = (b"cert", b"key", None)
 
-        has_cert, cert, key, passphrase = _mtls_helper.get_client_ssl_credentials(
+        has_cert, cert, key, passphrase, root_cert = _mtls_helper.get_client_ssl_credentials(
             context_aware_metadata_path=context_aware_metadata_path
         )
 
@@ -512,6 +523,7 @@ class TestGetClientSslCredentials(object):
         assert cert == b"cert"
         assert key == b"key"
         assert passphrase is None
+        assert root_cert is None
         mock_check_config_path.assert_called_with(context_aware_metadata_path)
         mock_load_json_file.assert_called_with(context_aware_metadata_path)
 
@@ -534,19 +546,25 @@ class TestGetWorkloadCertAndKey(object):
         mock_get_cert_config_path.return_value = "/path/to/cert"
         mock_load_json_file.return_value = {
             "cert_configs": {
-                "workload": {"cert_path": "cert/path", "key_path": "key/path"}
+                "workload": {
+                    "cert_path": "cert/path",
+                    "key_path": "key/path",
+                    "root_cert_path": "root/path",
+                }
             }
         }
         mock_read_cert_and_key_files.return_value = (
             pytest.public_cert_bytes,
             pytest.private_key_bytes,
+            pytest.public_cert_bytes,
         )
 
-        actual_cert, actual_key = _mtls_helper._get_workload_cert_and_key(
+        actual_cert, actual_key, actual_root = _mtls_helper._get_workload_cert_and_key(
             cert_config_path
         )
         assert actual_cert == pytest.public_cert_bytes
         assert actual_key == pytest.private_key_bytes
+        assert actual_root == pytest.public_cert_bytes
 
     @mock.patch(
         "google.auth.transport._mtls_helper._get_cert_config_path", autospec=True
@@ -554,9 +572,10 @@ class TestGetWorkloadCertAndKey(object):
     def test_file_not_found_returns_none(self, mock_get_cert_config_path):
         mock_get_cert_config_path.return_value = None
 
-        actual_cert, actual_key = _mtls_helper._get_workload_cert_and_key()
+        actual_cert, actual_key, actual_root = _mtls_helper._get_workload_cert_and_key()
         assert actual_cert is None
         assert actual_key is None
+        assert actual_root is None
 
     @mock.patch("google.auth.transport._mtls_helper._load_json_file", autospec=True)
     @mock.patch(
@@ -740,6 +759,7 @@ class TestGetClientCertAndKey(object):
             True,
             pytest.public_cert_bytes,
             pytest.private_key_bytes,
+            None,
             None,
         )
 
@@ -977,15 +997,16 @@ class TestMtlsHelper:
     def test_call_client_cert_callback(self, mock_get_client_ssl_credentials):
         mock_get_client_ssl_credentials.return_value = (
             True,
-            b"cert_bytes",
-            b"key_bytes",
+            b"cert",
+            b"key",
             b"passphrase",
+            None,
         )
 
         cert, key = _mtls_helper.call_client_cert_callback()
 
-        assert cert == b"cert_bytes"
-        assert key == b"key_bytes"
+        assert cert == b"cert"
+        assert key == b"key"
         mock_get_client_ssl_credentials.assert_called_once_with(
             generate_encrypted_key=True
         )

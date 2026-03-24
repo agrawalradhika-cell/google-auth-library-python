@@ -36,9 +36,9 @@ def _get_ssl_channel_credentials(client_cert_callback=None):
     """Create SSL channel credentials with rotation support if possible.
 
     Args:
-        client_cert_callback (Optional[Callable[[], (bytes, bytes)]]):
-            The optional callback returns the client certificate and private
-            key bytes both in PEM format.
+        client_cert_callback (Optional[Callable[[], (bytes, bytes) or (bytes, bytes, bytes)]]):
+            The optional callback returns the client certificate, private
+            key and optionally the root certificate bytes all in PEM format.
 
     Returns:
         grpc.ChannelCredentials: The created SSL channel credentials.
@@ -49,9 +49,16 @@ def _get_ssl_channel_credentials(client_cert_callback=None):
         ):
 
             def fetcher():
-                cert, key = client_cert_callback()
+                callback_result = client_cert_callback()
+                if len(callback_result) == 3:
+                    cert, key, root = callback_result
+                else:
+                    cert, key = callback_result
+                    root = None
+
                 return grpc.SslCertificateConfiguration(
-                    [grpc.SslKeyCertificatePair(key, cert)]
+                    [grpc.SslKeyCertificatePair(key, cert)],
+                    root_certificates=root,
                 )
 
             try:
@@ -62,8 +69,15 @@ def _get_ssl_channel_credentials(client_cert_callback=None):
                 # certificate_configuration_fetcher is not supported by this version of grpcio.
                 pass
 
-        cert, key = client_cert_callback()
-        return grpc.ssl_channel_credentials(certificate_chain=cert, private_key=key)
+        callback_result = client_cert_callback()
+        if len(callback_result) == 3:
+            cert, key, root = callback_result
+        else:
+            cert, key = callback_result
+            root = None
+        return grpc.ssl_channel_credentials(
+            certificate_chain=cert, private_key=key, root_certificates=root
+        )
 
     return grpc.ssl_channel_credentials()
 
@@ -261,10 +275,11 @@ def secure_authorized_channel(
             default SSL credentials are used if `GOOGLE_API_USE_CLIENT_CERTIFICATE`
             environment variable is explicitly set to `true`, otherwise one way TLS
             SSL credentials are used.
-        client_cert_callback (Callable[[], (bytes, bytes)]): Optional
-            callback function to obtain client certicate and key for mutual TLS
-            connection. This argument is mutually exclusive with
-            ssl_credentials; providing both will raise an exception.
+        client_cert_callback (Callable[[], (bytes, bytes) or (bytes, bytes, bytes)]):
+            Optional callback function to obtain client certicate, key and
+            optionally root certificate for mutual TLS connection. This argument
+            is mutually exclusive with ssl_credentials; providing both will
+            raise an exception.
             This argument does nothing unless `GOOGLE_API_USE_CLIENT_CERTIFICATE`
             environment variable is explicitly set to `true`.
         kwargs: Additional arguments to pass to :func:`grpc.secure_channel`.
@@ -324,15 +339,7 @@ class SslCredentials:
     """
 
     def __init__(self):
-        use_client_cert = _mtls_helper.check_use_client_cert()
-        if not use_client_cert:
-            self._is_mtls = False
-        else:
-            # Load client SSL credentials.
-            metadata_path = _mtls_helper._check_config_path(
-                _mtls_helper.CONTEXT_AWARE_METADATA_PATH
-            )
-            self._is_mtls = metadata_path is not None
+        self._is_mtls = _mtls_helper.check_use_client_cert()
 
     @property
     def ssl_credentials(self):
@@ -354,8 +361,8 @@ class SslCredentials:
             try:
 
                 def client_cert_callback():
-                    _, cert, key, _ = _mtls_helper.get_client_ssl_credentials()
-                    return cert, key
+                    _, cert, key, _, root = _mtls_helper.get_client_ssl_credentials()
+                    return cert, key, root
 
                 self._ssl_credentials = _get_ssl_channel_credentials(client_cert_callback)
             except exceptions.ClientCertError as caught_exc:

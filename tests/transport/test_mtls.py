@@ -152,7 +152,7 @@ def test_default_client_encrypted_cert_source(
     has_default_client_cert_source.return_value = True
 
     # Test good callback.
-    get_client_ssl_credentials.return_value = (True, b"cert", b"key", b"passphrase")
+    get_client_ssl_credentials.return_value = (True, b"cert", b"key", b"passphrase", None)
     callback = mtls.default_client_encrypted_cert_source("cert_path", "key_path")
     with mock.patch("{}.open".format(__name__), return_value=mock.MagicMock()):
         assert callback() == ("cert_path", "key_path", b"passphrase")

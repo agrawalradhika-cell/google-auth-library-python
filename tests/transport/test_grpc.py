@@ -166,6 +166,7 @@ class TestSecureAuthorizedChannel(object):
             PUBLIC_CERT_BYTES,
             PRIVATE_KEY_BYTES,
             None,
+            None,
         )
 
         channel = None
@@ -420,6 +421,42 @@ class TestGetSslChannelCredentials(object):
         )
         mock_cert_config.assert_called_once_with([mock_key_cert_pair.return_value])
 
+    def test__get_ssl_channel_credentials_with_root_cert(
+        self,
+        mock_ssl_channel_credentials,
+        mock_key_cert_pair,
+        mock_cert_config,
+    ):
+        ROOT_CERT_BYTES = b"root-cert"
+        client_cert_callback = mock.Mock()
+        client_cert_callback.return_value = (
+            PUBLIC_CERT_BYTES,
+            PRIVATE_KEY_BYTES,
+            ROOT_CERT_BYTES,
+        )
+
+        # Mock existence of SslCertificateConfiguration and SslKeyCertificatePair
+        with mock.patch("grpc.SslCertificateConfiguration", mock_cert_config), mock.patch(
+            "grpc.SslKeyCertificatePair", mock_key_cert_pair
+        ):
+            google.auth.transport.grpc._get_ssl_channel_credentials(client_cert_callback)
+
+        # Check if ssl_channel_credentials was called with fetcher
+        mock_ssl_channel_credentials.assert_called_once()
+        _, kwargs = mock_ssl_channel_credentials.call_args
+        assert "certificate_configuration_fetcher" in kwargs
+
+        # Call the fetcher and check if it calls client_cert_callback
+        fetcher = kwargs["certificate_configuration_fetcher"]
+        fetcher()
+        client_cert_callback.assert_called_once()
+        mock_key_cert_pair.assert_called_once_with(
+            PRIVATE_KEY_BYTES, PUBLIC_CERT_BYTES
+        )
+        mock_cert_config.assert_called_once_with(
+            [mock_key_cert_pair.return_value], root_certificates=ROOT_CERT_BYTES
+        )
+
     def test__get_ssl_channel_credentials_fallback(
         self,
         mock_ssl_channel_credentials,
@@ -443,6 +480,7 @@ class TestGetSslChannelCredentials(object):
         _, kwargs = mock_ssl_channel_credentials.call_args
         assert kwargs["certificate_chain"] == PUBLIC_CERT_BYTES
         assert kwargs["private_key"] == PRIVATE_KEY_BYTES
+        assert kwargs["root_certificates"] is None
 
     def test__get_ssl_channel_credentials_no_support(
         self,
@@ -472,6 +510,7 @@ class TestGetSslChannelCredentials(object):
         _, kwargs = mock_ssl_channel_credentials.call_args
         assert kwargs["certificate_chain"] == PUBLIC_CERT_BYTES
         assert kwargs["private_key"] == PRIVATE_KEY_BYTES
+        assert kwargs["root_certificates"] is None
 
 
 @mock.patch("grpc.ssl_channel_credentials", autospec=True)
@@ -496,13 +535,12 @@ class TestSslCredentials(object):
         ):
             ssl_credentials = google.auth.transport.grpc.SslCredentials()
 
-        # Since no context aware metadata is found, we wouldn't call
-        # get_client_ssl_credentials, and the SSL channel credentials created is
-        # non mTLS.
+        # Even if the metadata file doesn't exist, if GOOGLE_API_USE_CLIENT_CERTIFICATE
+        # is true, is_mtls should be true.
         assert ssl_credentials.ssl_credentials is not None
-        assert not ssl_credentials.is_mtls
-        mock_get_client_ssl_credentials.assert_not_called()
-        mock_ssl_channel_credentials.assert_called_once_with()
+        assert ssl_credentials.is_mtls
+        # get_client_ssl_credentials will be called via the callback/fetcher
+        # or immediately if fetcher is not supported.
 
     def test_get_client_ssl_credentials_failure(
         self,
@@ -536,6 +574,7 @@ class TestSslCredentials(object):
             True,
             PUBLIC_CERT_BYTES,
             PRIVATE_KEY_BYTES,
+            None,
             None,
         )
 

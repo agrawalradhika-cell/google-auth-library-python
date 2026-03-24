@@ -144,20 +144,21 @@ class TestMTLS:
     @mock.patch("google.auth.transport._mtls_helper._get_workload_cert_and_key")
     async def test_get_client_ssl_credentials_success(self, mock_workload):
         """Tests successful retrieval of workload credentials via the executor."""
-        mock_workload.return_value = (CERT_DATA, KEY_DATA)
+        mock_workload.return_value = (CERT_DATA, KEY_DATA, None)
 
-        success, cert, key, passphrase = await mtls.get_client_ssl_credentials()
+        success, cert, key, passphrase, root_cert = await mtls.get_client_ssl_credentials()
 
         assert success is True
         assert cert == CERT_DATA
         assert key == KEY_DATA
         assert passphrase is None
+        assert root_cert is None
 
     @pytest.mark.asyncio
     @mock.patch("google.auth.aio.transport.mtls.get_client_ssl_credentials")
     async def test_get_client_cert_and_key_no_credentials_found(self, mock_get_ssl):
         """Tests behavior when no credentials are found at the default location."""
-        mock_get_ssl.return_value = (False, None, None, None)
+        mock_get_ssl.return_value = (False, None, None, None, None)
 
         success, cert, key = await mtls.get_client_cert_and_key(None)
 
