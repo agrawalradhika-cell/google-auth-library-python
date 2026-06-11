@@ -478,7 +478,8 @@ class _RetryableUnaryStreamCall(grpc.Call, collections.abc.Iterator):
                 return val
             except grpc.RpcError as e:
                 status_code = e.code()
-                if self._interceptor._should_retry(status_code, self._retry_count):
+                can_replay = self._replayable_request_iterator.can_replay()
+                if can_replay and self._interceptor._should_retry(status_code, self._retry_count):
                     self._retry_count += 1
                     self._interceptor._wrapper.refresh_logic(self._retry_count)
                     time.sleep(random.uniform(0.1, 1.0))
