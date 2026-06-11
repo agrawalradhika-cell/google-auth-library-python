@@ -411,8 +411,7 @@ class _MTLSCallInterceptor(
         return _RetryableUnaryStreamCall(continuation, client_call_details, request, self)
 
     def intercept_stream_unary(self, continuation, client_call_details, request_iterator):
-        response = continuation(client_call_details, request_iterator)
-        return _RefreshTriggeringFuture(response, self)
+        return _RetryableStreamUnaryFuture(continuation, client_call_details, request_iterator, self)
 
     def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
         return _RetryableStreamStreamCall(continuation, client_call_details, request_iterator, self)
@@ -500,18 +499,41 @@ class _RetryableUnaryStreamCall(grpc.Call, collections.abc.Iterator):
     def details(self): return self._call.details()
 
 
-class _RefreshTriggeringFuture(grpc.Call, grpc.Future):
-    def __init__(self, target_future, interceptor):
-        self._target_future = target_future
+class _RetryableStreamUnaryFuture(grpc.Call, grpc.Future):
+    def __init__(self, continuation, client_call_details, request_iterator, interceptor):
+        self._continuation = continuation
+        self._client_call_details = client_call_details
+        self._replayable_request_iterator = _ReplayableIterator(request_iterator)
         self._interceptor = interceptor
+        self._retry_count = 0
+        self._target_future = None
+        self._start_call()
+
+    def _start_call(self):
+        req_iter = iter(self._replayable_request_iterator)
+        self._target_future = self._continuation(self._client_call_details, req_iter)
 
     def result(self, timeout=None):
-        try:
-            return self._target_future.result(timeout)
-        except grpc.RpcError as e:
-            if self._interceptor._should_retry(e.code(), 0):
-                self._interceptor._wrapper.refresh_logic(1)
-            raise e
+        while True:
+            try:
+                return self._target_future.result(timeout)
+            except grpc.RpcError as e:
+                status_code = e.code()
+                can_replay = self._replayable_request_iterator.can_replay()
+                
+                if can_replay and self._interceptor._should_retry(status_code, self._retry_count):
+                    self._retry_count += 1
+                    self._interceptor._wrapper.refresh_logic(self._retry_count)
+                    
+                    import time, random
+                    time.sleep(random.uniform(0.1, 1.0))
+                    
+                    self._start_call()
+                    continue
+                
+                if self._interceptor._should_retry(status_code, 0):
+                    self._interceptor._wrapper.refresh_logic(1)
+                raise e
 
     def exception(self, timeout=None):
         exc = self._target_future.exception(timeout)
