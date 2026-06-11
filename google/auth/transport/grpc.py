@@ -481,6 +481,7 @@ class _RetryableUnaryStreamCall(grpc.Call, collections.abc.Iterator):
                 if can_replay and self._interceptor._should_retry(status_code, self._retry_count):
                     self._retry_count += 1
                     self._interceptor._wrapper.refresh_logic(self._retry_count)
+                    _LOGGER.info("gRPC stream connection dropped due to cert rotation. Transparently re-fetching the stream...")
                     time.sleep(random.uniform(0.1, 1.0))
                     self._start_call()
                     continue
@@ -524,6 +525,7 @@ class _RetryableStreamUnaryFuture(grpc.Call, grpc.Future):
                 if can_replay and self._interceptor._should_retry(status_code, self._retry_count):
                     self._retry_count += 1
                     self._interceptor._wrapper.refresh_logic(self._retry_count)
+                    _LOGGER.info("gRPC stream connection dropped due to cert rotation. Transparently re-fetching the stream...")
                     
                     import time, random
                     time.sleep(random.uniform(0.1, 1.0))
@@ -623,6 +625,7 @@ class _RetryableStreamStreamCall(grpc.Call, collections.abc.Iterator):
                 if self._interceptor._should_retry(status_code, self._retry_count):
                     self._retry_count += 1
                     self._interceptor._wrapper.refresh_logic(self._retry_count)
+                    _LOGGER.info("gRPC stream connection dropped due to cert rotation. Transparently re-fetching the stream...")
                     time.sleep(random.uniform(0.1, 1.0))
                     self._start_call()
                     continue
