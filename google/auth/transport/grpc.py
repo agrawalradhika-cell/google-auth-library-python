@@ -17,7 +17,10 @@
 from __future__ import absolute_import
 
 import logging
-import logging
+import threading
+import collections.abc
+import time
+import random
 
 _LOGGER = logging.getLogger(__name__)
 from google.auth import exceptions
@@ -477,8 +480,7 @@ class _RetryableUnaryStreamCall(grpc.Call, collections.abc.Iterator):
                 return val
             except grpc.RpcError as e:
                 status_code = e.code()
-                can_replay = self._replayable_request_iterator.can_replay()
-                if can_replay and self._interceptor._should_retry(status_code, self._retry_count):
+                if not self._yielded_any and self._interceptor._should_retry(status_code, self._retry_count):
                     self._retry_count += 1
                     self._interceptor._wrapper.refresh_logic(self._retry_count)
                     _LOGGER.info("gRPC stream connection dropped due to cert rotation. Transparently re-fetching the stream...")
@@ -559,14 +561,19 @@ class _RetryableStreamUnaryFuture(grpc.Call, grpc.Future):
 
 
 class _ReplayableIterator(object):
-    def __init__(self, target_iterator):
+    def __init__(self, target_iterator, max_items=1000):
         self._target_iterator = target_iterator
+        self._max_items = max_items
         self._buffer = []
         self._lock = threading.Lock()
         self._exhausted = False
+        self._can_replay = True
 
     def __iter__(self):
         return _ReplayableIteratorReader(self)
+
+    def can_replay(self):
+        return self._can_replay
 
 
 class _ReplayableIteratorReader(object):
@@ -586,7 +593,11 @@ class _ReplayableIteratorReader(object):
 
             try:
                 val = next(self._parent._target_iterator)
-                self._parent._buffer.append(val)
+                if self._parent._can_replay:
+                    self._parent._buffer.append(val)
+                    if len(self._parent._buffer) > self._parent._max_items:
+                        self._parent._buffer.clear()
+                        self._parent._can_replay = False
                 self._read_index += 1
                 return val
             except StopIteration:
@@ -622,7 +633,8 @@ class _RetryableStreamStreamCall(grpc.Call, collections.abc.Iterator):
                 return val
             except grpc.RpcError as e:
                 status_code = e.code()
-                if self._interceptor._should_retry(status_code, self._retry_count):
+                can_replay = self._replayable_request_iterator.can_replay()
+                if not self._yielded_any_response and can_replay and self._interceptor._should_retry(status_code, self._retry_count):
                     self._retry_count += 1
                     self._interceptor._wrapper.refresh_logic(self._retry_count)
                     _LOGGER.info("gRPC stream connection dropped due to cert rotation. Transparently re-fetching the stream...")
