@@ -650,6 +650,7 @@ class _RetryableStreamStreamCall(grpc.Call, collections.abc.Iterator):
     def is_active(self): return self._call.is_active()
     def time_remaining(self): return self._call.time_remaining()
     def add_callback(self, callback): self._call.add_callback(callback)
+    def add_done_callback(self, callback): self._call.add_done_callback(callback)
     def initial_metadata(self): return self._call.initial_metadata()
     def trailing_metadata(self): return self._call.trailing_metadata()
     def code(self): return self._call.code()
