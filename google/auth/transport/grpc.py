@@ -434,12 +434,20 @@ class _MTLSRefreshingChannel(grpc.Channel):
             if cached_fp != current_fp:
                 _LOGGER.debug("Wrapper: Refreshing mTLS channel. Retry count: %d", count)
                 old_channel = self._channel
+                
+                client_cert_callback = self._factory_args.get("client_cert_callback")
+                if client_cert_callback:
+                    cert, _ = client_cert_callback()
+                    self._cached_cert = cert
+                else:
+                    try:
+                        creds = _mtls_helper.get_client_ssl_credentials()
+                        self._cached_cert = creds[1]
+                    except Exception:
+                        pass
+                        
                 self._channel = secure_authorized_channel(**self._factory_args)
-
-                creds = _mtls_helper.get_client_ssl_credentials()
-                self._cached_cert = creds[1]
                 old_channel.close()
-
     def unary_unary(self, method, *args, **kwargs):
         # Always return a callable from the CURRENT channel
         return self._channel.unary_unary(method, *args, **kwargs)
