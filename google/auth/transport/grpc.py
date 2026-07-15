@@ -434,7 +434,6 @@ class _MTLSRefreshingChannel(grpc.Channel):
             if cached_fp != current_fp:
                 _LOGGER.debug("Wrapper: Refreshing mTLS channel. Retry count: %d", count)
                 old_channel = self._channel
-                
                 client_cert_callback = self._factory_args.get("client_cert_callback")
                 if client_cert_callback:
                     cert, _ = client_cert_callback()
@@ -620,46 +619,56 @@ class _RetryableStreamStreamCall(grpc.Call, collections.abc.Iterator):
         self._replayable_request_iterator = _ReplayableIterator(request_iterator)
         self._interceptor = interceptor
         self._retry_count = 0
+        self._done_callbacks = []
         self._call = None
         self._response_iterator = None
         self._yielded_any_response = False
         self._start_call()
+    def _on_inner_call_done(self, inner_call):
+        status_code = inner_call.code()
+        if status_code == grpc.StatusCode.UNAUTHENTICATED:
+            can_replay = self._replayable_request_iterator.can_replay()
+            if not self._yielded_any_response and can_replay and self._interceptor._should_retry(status_code, self._retry_count):
+                # IMPORTANT: Swallow the callback so bidi.py does not tear down 
+                # the router tracking threads while we attempt to reconstruct the stream!
+                return
 
+        for cb in self._done_callbacks:
+            cb(self)
     def _start_call(self):
         req_iter = iter(self._replayable_request_iterator)
         self._call = self._continuation(self._client_call_details, req_iter)
         self._response_iterator = iter(self._call)
+        self._call.add_done_callback(self._on_inner_call_done)
+
+    def add_done_callback(self, callback):
+        # Store requested callbacks natively instead of forwarding blindly
+        self._done_callbacks.append(callback)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        while True:
-            try:
-                val = next(self._response_iterator)
-                self._yielded_any_response = True
-                return val
-            except grpc.RpcError as e:
-                status_code = e.code()
-                can_replay = self._replayable_request_iterator.can_replay()
-                if not self._yielded_any_response and can_replay and self._interceptor._should_retry(status_code, self._retry_count):
-                    self._retry_count += 1
-                    self._interceptor._wrapper.refresh_logic(self._retry_count)
-                    _LOGGER.info("gRPC stream connection dropped due to cert rotation. Transparently re-fetching the stream...")
-                    time.sleep(random.uniform(0.1, 1.0))
-                    self._start_call()
-                    continue
-                
-                if self._interceptor._should_retry(status_code, 0):
-                    self._interceptor._wrapper.refresh_logic(1)
-                raise e
+        try:
+            response = next(self._response_iterator)
+            self._yielded_any_response = True
+            return response
+        except grpc.RpcError as e:
+            if not self._yielded_any_response and self._interceptor._should_retry(
+                e.code(), self._retry_count
+            ):
+                self._interceptor._wrapper.refresh_logic(self._retry_count)
+                self._retry_count += 1
+                self._start_call()
+                return next(self)
+            raise e
 
-    def cancel(self): self._call.cancel()
+    # Simple pass-throughs for the remaining gRPC methods
+    def cancel(self): return self._call.cancel()
+    def code(self): return self._call.code()
+    def details(self): return self._call.details()
     def is_active(self): return self._call.is_active()
     def time_remaining(self): return self._call.time_remaining()
     def add_callback(self, callback): self._call.add_callback(callback)
-    def add_done_callback(self, callback): self._call.add_done_callback(callback)
     def initial_metadata(self): return self._call.initial_metadata()
     def trailing_metadata(self): return self._call.trailing_metadata()
-    def code(self): return self._call.code()
-    def details(self): return self._call.details()
