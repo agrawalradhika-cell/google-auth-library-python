@@ -123,12 +123,11 @@ class TestRequestResponse(async_compliance.RequestResponseTests):
 
     @pytest.mark.asyncio
     async def test_timeout(self):
-    http = mock.create_autospec(
-        aiohttp.ClientSession, instance=True, _auto_decompress=False
-    )
-    request = aiohttp_requests.Request(http)
-    await request(url="http://example.com", method="GET", timeout=5)
-
+        http = mock.create_autospec(
+            aiohttp.ClientSession, instance=True, _auto_decompress=False
+        )
+        request = aiohttp_requests.Request(http)
+        await request(url="http://example.com", method="GET", timeout=5)
 
 
 class CredentialsStub(google.auth._credentials_async.Credentials):
