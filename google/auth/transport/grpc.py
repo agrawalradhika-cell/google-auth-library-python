@@ -387,7 +387,7 @@ class _MTLSCallInterceptor(
             return True
 
         # Fingerprint check logic
-        _, _, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(attempt_cert)
+        _, _, _, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(attempt_cert)
         return cached_fp != current_fp
 
     def intercept_unary_unary(self, continuation, client_call_details, request):
@@ -436,22 +436,20 @@ class _MTLSRefreshingChannel(grpc.Channel):
     def refresh_logic(self, count):
         with self._lock:
             # Re-check inside lock to prevent race conditions
-            _, _, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(self._cached_cert)
+            cert, key, passphrase, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(self._cached_cert)
             if cached_fp != current_fp:
                 _LOGGER.debug("Wrapper: Refreshing mTLS channel. Retry count: %d", count)
                 old_channel = self._channel
-                client_cert_callback = self._factory_args.get("client_cert_callback")
-                if client_cert_callback:
-                    cert, _ = client_cert_callback()
-                    self._cached_cert = cert
-                else:
-                    try:
-                        creds = _mtls_helper.get_client_ssl_credentials()
-                        self._cached_cert = creds[1]
-                    except Exception:
-                        pass
-                        
-                self._channel = secure_authorized_channel(**self._factory_args)
+                
+                # Consume EXACT bytes to prevent race condition
+                self._cached_cert = cert
+                
+                kwargs = self._factory_args.copy()
+                
+                # In python grpc, ssl_channel_credentials doesn't accept a passphrase kwarg natively.
+                # To securely rotate, we bypass the callback logic and inject the extracted decrypted credentials directly.
+                kwargs["client_cert_callback"] = lambda: (cert, key)
+                self._channel = secure_authorized_channel(**kwargs)
                 
                 for callback in self._subscribers:
                     try:

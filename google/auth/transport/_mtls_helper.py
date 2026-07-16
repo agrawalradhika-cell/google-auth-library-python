@@ -516,7 +516,7 @@ def check_parameters_for_unauthorized_response(cached_cert):
         str: The base64-encoded SHA256 cached fingerprint.
         str: The base64-encoded SHA256 current cert fingerprint.
     """
-    call_cert_bytes, call_key_bytes = call_client_cert_callback()
+    _, call_cert_bytes, call_key_bytes, passphrase = get_client_ssl_credentials(generate_encrypted_key=True)
     cert_obj = _agent_identity_utils.parse_certificate(call_cert_bytes)
     current_cert_fingerprint = _agent_identity_utils.calculate_certificate_fingerprint(
         cert_obj
@@ -527,12 +527,12 @@ def check_parameters_for_unauthorized_response(cached_cert):
         )
     else:
         cached_fingerprint = current_cert_fingerprint
-    return call_cert_bytes, call_key_bytes, cached_fingerprint, current_cert_fingerprint
+    return call_cert_bytes, call_key_bytes, passphrase, cached_fingerprint, current_cert_fingerprint
 
 
 def call_client_cert_callback():
     """Calls the client cert callback and returns the certificate and key."""
-    _, cert_bytes, key_bytes, passphrase = get_client_ssl_credentials(
+    _, cert_bytes, key_bytes, _ = get_client_ssl_credentials(
         generate_encrypted_key=True
     )
     return cert_bytes, key_bytes
