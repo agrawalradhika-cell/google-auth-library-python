@@ -21,6 +21,7 @@ import threading
 import collections.abc
 import time
 import random
+import concurrent.futures
 
 _LOGGER = logging.getLogger(__name__)
 from google.auth import exceptions
@@ -373,6 +374,7 @@ class _MTLSCallInterceptor(
     def __init__(self):
         self._wrapper = None
         self._max_retries = 2 # Set your desired limit here
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=5)
 
     def _should_retry(self, code, retry_count, attempt_cert):
         if code != grpc.StatusCode.UNAUTHENTICATED or not self._wrapper:
@@ -387,7 +389,7 @@ class _MTLSCallInterceptor(
             return True
 
         # Fingerprint check logic
-        _, _, _, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(attempt_cert)
+        _, _, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(attempt_cert)
         return cached_fp != current_fp
 
     def intercept_unary_unary(self, continuation, client_call_details, request):
@@ -436,20 +438,22 @@ class _MTLSRefreshingChannel(grpc.Channel):
     def refresh_logic(self, count):
         with self._lock:
             # Re-check inside lock to prevent race conditions
-            cert, key, passphrase, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(self._cached_cert)
+            _, _, cached_fp, current_fp = _mtls_helper.check_parameters_for_unauthorized_response(self._cached_cert)
             if cached_fp != current_fp:
                 _LOGGER.debug("Wrapper: Refreshing mTLS channel. Retry count: %d", count)
                 old_channel = self._channel
-                
-                # Consume EXACT bytes to prevent race condition
-                self._cached_cert = cert
-                
-                kwargs = self._factory_args.copy()
-                
-                # In python grpc, ssl_channel_credentials doesn't accept a passphrase kwarg natively.
-                # To securely rotate, we bypass the callback logic and inject the extracted decrypted credentials directly.
-                kwargs["client_cert_callback"] = lambda: (cert, key)
-                self._channel = secure_authorized_channel(**kwargs)
+                client_cert_callback = self._factory_args.get("client_cert_callback")
+                if client_cert_callback:
+                    cert, _ = client_cert_callback()
+                    self._cached_cert = cert
+                else:
+                    try:
+                        creds = _mtls_helper.get_client_ssl_credentials()
+                        self._cached_cert = creds[1]
+                    except Exception:
+                        pass
+                        
+                self._channel = secure_authorized_channel(**self._factory_args)
                 
                 for callback in self._subscribers:
                     try:
@@ -538,57 +542,114 @@ class _RetryableStreamUnaryFuture(grpc.Call, grpc.Future):
         self._replayable_request_iterator = _ReplayableIterator(request_iterator)
         self._interceptor = interceptor
         self._retry_count = 0
+        self._done_callbacks = []
         self._target_future = None
+        self._lock = threading.Lock()
         self._start_call()
+
+    def _on_inner_future_done(self, inner_future):
+        with self._lock:
+            if inner_future is not self._target_future:
+                return
+                
+        exc = inner_future.exception()
+        if isinstance(exc, grpc.RpcError):
+            status_code = exc.code()
+            can_replay = self._replayable_request_iterator.can_replay()
+            
+            if can_replay and self._interceptor._should_retry(status_code, self._retry_count, getattr(self, "_attempt_cert", None)):
+                self._retry_count += 1
+                
+                def async_retry():
+                    self._interceptor._wrapper.refresh_logic(self._retry_count)
+                    time.sleep(random.uniform(0.1, 1.0))
+                    self._start_call()
+                    
+                self._interceptor._executor.submit(async_retry)
+                return
+                
+            if getattr(self._interceptor, "_wrapper", None):
+                if self._interceptor._should_retry(status_code, 0, getattr(self, "_attempt_cert", None)):
+                    self._interceptor._wrapper.refresh_logic(1)
+
+        with self._lock:
+            for cb in self._done_callbacks:
+                cb(self)
 
     def _start_call(self):
         self._attempt_cert = self._interceptor._wrapper._cached_cert if self._interceptor._wrapper else None
         req_iter = iter(self._replayable_request_iterator)
-        self._target_future = self._continuation(self._client_call_details, req_iter)
+        with self._lock:
+            self._target_future = self._continuation(self._client_call_details, req_iter)
+            self._target_future.add_done_callback(self._on_inner_future_done)
 
     def result(self, timeout=None):
+        deadline = time.time() + timeout if timeout else None
+        
         while True:
+            with self._lock:
+                current_future = self._target_future
+                
             try:
-                return self._target_future.result(timeout)
+                if deadline:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        raise grpc.FutureTimeoutError()
+                    return current_future.result(timeout=remaining)
+                else:    
+                    return current_future.result()
+                    
             except grpc.RpcError as e:
-                status_code = e.code()
-                can_replay = self._replayable_request_iterator.can_replay()
-                
-                if can_replay and self._interceptor._should_retry(status_code, self._retry_count, self._attempt_cert):
-                    self._retry_count += 1
-                    self._interceptor._wrapper.refresh_logic(self._retry_count)
-                    _LOGGER.info("gRPC stream connection dropped due to cert rotation. Transparently re-fetching the stream...")
-                    
-                    time.sleep(random.uniform(0.1, 1.0))
-                    
-                    self._start_call()
-                    continue
-                
-                if getattr(self._interceptor, "_wrapper", None):
-                    if self._interceptor._should_retry(status_code, 0, self._attempt_cert):
-                        self._interceptor._wrapper.refresh_logic(1)
+                with self._lock:
+                    if current_future is not self._target_future:
+                        continue
                 raise e
 
-    def exception(self, timeout=None):
-        exc = self._target_future.exception(timeout)
-        if isinstance(exc, grpc.RpcError):
-            if getattr(self._interceptor, "_wrapper", None):
-                if self._interceptor._should_retry(exc.code(), 0, getattr(self, "_attempt_cert", None)):
-                    self._interceptor._wrapper.refresh_logic(1)
-        return exc
+    def add_done_callback(self, fn):
+        with self._lock:
+            self._done_callbacks.append(fn)
+            if self._target_future.done():
+                exc = self._target_future.exception()
+                if not (isinstance(exc, grpc.RpcError) and self._interceptor._should_retry(exc.code(), self._retry_count, getattr(self, "_attempt_cert", None))):
+                    fn(self)
 
-    def cancel(self): return self._target_future.cancel()
-    def cancelled(self): return self._target_future.cancelled()
-    def running(self): return self._target_future.running()
-    def done(self): return self._target_future.done()
-    def add_done_callback(self, fn): self._target_future.add_done_callback(fn)
-    def is_active(self): return self._target_future.is_active()
-    def time_remaining(self): return self._target_future.time_remaining()
-    def add_callback(self, callback): self._target_future.add_callback(callback)
-    def initial_metadata(self): return self._target_future.initial_metadata()
-    def trailing_metadata(self): return self._target_future.trailing_metadata()
-    def code(self): return self._target_future.code()
-    def details(self): return self._target_future.details()
+    def exception(self, timeout=None):
+        try:
+            self.result(timeout)
+            return None
+        except Exception as e:
+            return e
+            
+    def traceback(self, timeout=None):
+        try:
+            self.result(timeout)
+            return None
+        except Exception:
+            with self._lock:
+                return self._target_future.traceback(timeout=timeout)
+
+    def cancel(self): 
+        with self._lock: return self._target_future.cancel()
+    def cancelled(self): 
+        with self._lock: return self._target_future.cancelled()
+    def running(self): 
+        with self._lock: return self._target_future.running()
+    def done(self): 
+        with self._lock: return self._target_future.done()
+    def code(self): 
+        with self._lock: return self._target_future.code()
+    def details(self): 
+        with self._lock: return self._target_future.details()
+    def is_active(self):
+        with self._lock: return self._target_future.is_active()
+    def time_remaining(self):
+        with self._lock: return self._target_future.time_remaining()
+    def initial_metadata(self):
+        with self._lock: return self._target_future.initial_metadata()
+    def trailing_metadata(self):
+        with self._lock: return self._target_future.trailing_metadata()
+    def add_callback(self, cb):
+        with self._lock: return self._target_future.add_callback(cb)
 
 
 class _ReplayableIterator(object):
@@ -677,10 +738,13 @@ class _RetryableStreamStreamCall(grpc.Call, collections.abc.Iterator):
         self._yielded_any_response = False
         self._start_call()
     def _on_inner_call_done(self, inner_call):
+        if inner_call is not self._call:
+            return
+            
         status_code = inner_call.code()
         if status_code == grpc.StatusCode.UNAUTHENTICATED:
             can_replay = self._replayable_request_iterator.can_replay()
-            if not self._yielded_any_response and can_replay and self._interceptor._should_retry(status_code, self._retry_count):
+            if not self._yielded_any_response and can_replay and self._interceptor._should_retry(status_code, self._retry_count, getattr(self, "_attempt_cert", None)):
                 # IMPORTANT: Swallow the callback so bidi.py does not tear down 
                 # the router tracking threads while we attempt to reconstruct the stream!
                 return
